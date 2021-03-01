@@ -17,7 +17,7 @@
 
 
 Name:           vpndnshelper
-Version:        0.0.2
+Version:        0.0.3
 Release:        0
 Summary:        VPN DNS Helper
 License:        GPL-2.0-only
