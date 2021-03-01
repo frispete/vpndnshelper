@@ -1,9 +1,8 @@
 [Unit]
 Description=VPN DNS Helper
-# This is the actually tested environment
+# dnsmasq needs to be the resolver on localhost
+Wants=dnsmasq.service
 Wants=NetworkManager.service
-# This is a hard requirement: dnsmasq needs to be the local resolver
-Requires=dnsmasq.service
 
 [Service]
 ExecStart=/usr/bin/vpndnshelper -v
