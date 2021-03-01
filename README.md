@@ -46,6 +46,7 @@ Create a config file with the name `/etc/dnsmasq.d/vpndnshelper.conf`:
 # force primary interface
 interface=lo
 bind-interfaces
+domain-needed
 
 # disable dhcp
 no-dhcp-interface=
@@ -61,6 +62,10 @@ server=12.34.56.78
 In this file, the section between the VPN DNS comments is adjusted dynamically.
 The VPN domain names and the local server need to be set up correctly. Before
 the VPN is started, it's a good idea to keep the VPN DNS server disabled.
+
+The paths of `/run/dnsmasq-forwarders.conf` and `/etc/dnsmasq.d/vpndnshelper.conf`,
+as well as the `dnsmasq` restart command can be changed via the environment.
+See `vpndnshelper --help` for further configurability.
 
 After installation checks
 -------------------------
@@ -93,8 +98,7 @@ make us depending harder on `NetworkManager` and comes with its own can of worms
 
 For now, we rely on being started with a teared down VPN tunnel in order to
 collect the local nameserver. If you need to restart `vpndnshelper` during
-operation, tear down the VPN tunnel first, or you end up with enabled VPN 
-nameserver `/etc/dnsmasq.d/vpndnshelper.conf`, which may prevent you from re-
-establishing the VPN tunnel again, since you cannot reach the VPN nameserver
-anymore. Your only choice is disabling those entries manually then.
+operation, tear down the VPN tunnel first. `vpndnshelper` will reset the VPN
+DNS server on restart, but will not be able to catch up with current state with
+an open VPN tunnel.
 
