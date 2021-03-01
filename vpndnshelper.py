@@ -8,6 +8,11 @@ Usage: {appname} [-hVv][-l log]
        -v, --verbose        verbose mode (cumulative)
        -l, --logfile=fname  log to this file
 
+Defaults (supply deviating values via environment):
+FORWARDERS: {forwarders}
+VPNDNSCONF: {vpndnsconf}
+DNSSERVICE: {dnsservice}
+
 Copyright:
 (c)2021 by {author}
 
@@ -18,7 +23,7 @@ License:
 # vim:set et ts=8 sw=4:
 #
 
-__version__ = '0.0.1'
+__version__ = '0.0.2'
 __author__ = 'Hans-Peter Jansen <hans-peter.jansen@suse.com>'
 __license__ = 'GNU GPL v2 - see http://www.gnu.org/licenses/gpl2.txt for details'
 __homepage__ = 'https://github.com/frispete/vpndnshelper'
@@ -28,6 +33,7 @@ import os
 import re
 import sys
 import time
+import atexit
 import getopt
 import signal
 import logging
@@ -54,10 +60,10 @@ class gpar:
     loglevel = logging.WARNING
     logfile = '-'
     pid = os.getpid()
-    # internal for now
-    forwarders = '/run/dnsmasq-forwarders.conf'
-    vpnconf = '/etc/dnsmasq.d/vpndnshelper.conf'
-    dnsservice = ['systemctl', 'restart', 'dnsmasq.service']
+    forwarders = os.environ.get('FORWARDERS', '/run/dnsmasq-forwarders.conf')
+    vpndnsconf = os.environ.get('VPNDNSCONF', '/etc/dnsmasq.d/vpndnshelper.conf')
+    dnsservice = os.environ.get('DNSSERVICE', 'systemctl restart dnsmasq.service')
+    # internal
     vpn_ns_start_tag = '# VPN DNS server'
     vpn_ns_end_tag = '# VPN DNS revres'
 
@@ -117,13 +123,13 @@ def rstrip(line, lst = ' \t\r\n'):
     return line
 
 
-def strlist(it, sep = ', '):
+def sstrlist(it, sep = ', '):
     """Return a sorted string with it elements mapped to str, concatenated by sep"""
     return sep.join(sorted(map(str, it)))
 
 
 def ts2time(ts):
-    """Return a ts converted to human readable timestamp"""
+    """Convert a timestamp since epoch into human readable form"""
     return time.asctime(time.localtime(ts))
 
 
@@ -142,14 +148,14 @@ def get_ns(fname):
                 else:
                     ns.add(ip)
     if ns:
-        log.debug('nameserver: {}'.format(strlist(ns)))
+        log.debug('nameserver: {}'.format(sstrlist(ns)))
     return ns
 
 
-def update_vpn_ns(fname, enable, nameserver = set()):
-    """Update nameserver entries in dnsmasq config file"""
+def update_vpn_ns(fname, enable, nameserver, dnsservice):
+    """Update nameserver entries in dnsmasq config file and restart dnsmasq"""
     if enable:
-        log.info('enable vpn nameserver {} in {}'.format(strlist(nameserver), fname))
+        log.info('enable vpn nameserver {} in {}'.format(sstrlist(nameserver), fname))
     else:
         log.info('disable vpn nameserver in {}'.format(fname))
     vpn_ns = False
@@ -198,6 +204,15 @@ def update_vpn_ns(fname, enable, nameserver = set()):
         log.info('replace {}'.format(fname))
         os.unlink(fname)
         open(fname, 'w').write('\n'.join(lines) + '\n')
+        # restart dnsmasq service
+        log.info('execute {}'.format(dnsservice))
+        subprocess.call(dnsservice.split())
+
+    # make sure, redirection is disabled on exit
+    if enable:
+        atexit.register(update_vpn_ns, fname, False, nameserver, dnsservice)
+    else:
+        atexit.unregister(update_vpn_ns)
 
 
 class ForwardHandler(pyinotify.ProcessEvent):
@@ -206,35 +221,26 @@ class ForwardHandler(pyinotify.ProcessEvent):
         self.forwarders = par.forwarders
         self.forwarders_ts = os.path.getmtime(self.forwarders)
         log.debug('forwarders ts: {}'.format(ts2time(self.forwarders_ts)))
-        self.vpnconf = par.vpnconf
+        self.vpndnsconf = par.vpndnsconf
         self.dnsservice = par.dnsservice
         self.local_server = par.local_server
         self.vpn = False
 
     def check_forwarders(self):
-        restart_ns = False
         if self.forwarders_ts != os.path.getmtime(self.forwarders):
             ns = get_ns(self.forwarders)
             if ns != self.local_server:
                 # nameserver were added, remove local ns
                 ns -= self.local_server
-                log.debug('new nameserver found: {}'.format(strlist(ns)))
-                update_vpn_ns(self.vpnconf, True, ns)
+                log.debug('new nameserver found: {}'.format(sstrlist(ns)))
+                update_vpn_ns(self.vpndnsconf, True, ns, self.dnsservice)
                 self.vpn = True
-                restart_ns = True
             elif self.vpn:
                 log.debug('vpn nameserver disappeared')
-                update_vpn_ns(self.vpnconf, False)
+                update_vpn_ns(self.vpndnsconf, False, ns, self.dnsservice)
                 self.vpn = False
-                restart_ns = True
             self.forwarders_ts = os.path.getmtime(self.forwarders)
             log.debug('forwarders ts: {}'.format(ts2time(self.forwarders_ts)))
-        if restart_ns:
-            self.restart_dns_service()
-
-    def restart_dns_service(self):
-        log.info('execute {}'.format(' '.join(self.dnsservice)))
-        subprocess.call(self.dnsservice)
 
     def process_event(self, event):
         if event.pathname == self.forwarders:
@@ -256,7 +262,7 @@ def run():
     """Watch /run for close events"""
     ret = 0
     log.info('started with pid {pid} in {appdir}'.format(**gpar.__dict__))
-    # assume VPN is not active (TODO: check openconnect/openvpn process)
+    # assume VPN is NOT active (TODO: check openconnect/openvpn process, hard!)
     gpar.local_server = get_ns(gpar.forwarders)
     wm = pyinotify.WatchManager()
     mask = pyinotify.IN_CLOSE_WRITE | pyinotify.IN_CLOSE_NOWRITE
@@ -299,7 +305,7 @@ def main(argv = None):
 
     for fn, mode, err in (
             (gpar.forwarders, os.R_OK, 'readable'),
-            (gpar.vpnconf, os.W_OK, 'writable'),
+            (gpar.vpndnsconf, os.W_OK, 'writable'),
         ):
         if not os.access(fn, mode):
             exit(IO_ERROR, 'mandatory file {} isn\'t {}'.format(fn, err))
