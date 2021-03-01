@@ -23,7 +23,7 @@ License:
 # vim:set et ts=8 sw=4:
 #
 
-__version__ = '0.0.2'
+__version__ = '0.0.3'
 __author__ = 'Hans-Peter Jansen <hans-peter.jansen@suse.com>'
 __license__ = 'GNU GPL v2 - see http://www.gnu.org/licenses/gpl2.txt for details'
 __homepage__ = 'https://github.com/frispete/vpndnshelper'
@@ -33,7 +33,6 @@ import os
 import re
 import sys
 import time
-import atexit
 import getopt
 import signal
 import logging
@@ -152,8 +151,12 @@ def get_ns(fname):
     return ns
 
 
-def update_vpn_ns(fname, enable, nameserver, dnsservice):
+def update_vpn_ns(enable, nameserver = set()):
     """Update nameserver entries in dnsmasq config file and restart dnsmasq"""
+    if enable and not nameserver:
+        log.error('cannot enable without any nameserver')
+        return
+    fname = gpar.vpndnsconf
     if enable:
         log.info('enable vpn nameserver {} in {}'.format(sstrlist(nameserver), fname))
     else:
@@ -202,17 +205,11 @@ def update_vpn_ns(fname, enable, nameserver, dnsservice):
     if lines:
         # rewrite dnsmasq config file
         log.info('replace {}'.format(fname))
-        os.unlink(fname)
+        os.rename(fname, fname + '~')
         open(fname, 'w').write('\n'.join(lines) + '\n')
         # restart dnsmasq service
-        log.info('execute {}'.format(dnsservice))
-        subprocess.call(dnsservice.split())
-
-    # make sure, redirection is disabled on exit
-    if enable:
-        atexit.register(update_vpn_ns, fname, False, nameserver, dnsservice)
-    else:
-        atexit.unregister(update_vpn_ns)
+        log.info('execute "{}"'.format(gpar.dnsservice))
+        subprocess.call(gpar.dnsservice.split())
 
 
 class ForwardHandler(pyinotify.ProcessEvent):
@@ -221,8 +218,6 @@ class ForwardHandler(pyinotify.ProcessEvent):
         self.forwarders = par.forwarders
         self.forwarders_ts = os.path.getmtime(self.forwarders)
         log.debug('forwarders ts: {}'.format(ts2time(self.forwarders_ts)))
-        self.vpndnsconf = par.vpndnsconf
-        self.dnsservice = par.dnsservice
         self.local_server = par.local_server
         self.vpn = False
 
@@ -233,11 +228,11 @@ class ForwardHandler(pyinotify.ProcessEvent):
                 # nameserver were added, remove local ns
                 ns -= self.local_server
                 log.debug('new nameserver found: {}'.format(sstrlist(ns)))
-                update_vpn_ns(self.vpndnsconf, True, ns, self.dnsservice)
+                update_vpn_ns(True, ns)
                 self.vpn = True
             elif self.vpn:
                 log.debug('vpn nameserver disappeared')
-                update_vpn_ns(self.vpndnsconf, False, ns, self.dnsservice)
+                update_vpn_ns(False)
                 self.vpn = False
             self.forwarders_ts = os.path.getmtime(self.forwarders)
             log.debug('forwarders ts: {}'.format(ts2time(self.forwarders_ts)))
@@ -260,7 +255,6 @@ class ForwardHandler(pyinotify.ProcessEvent):
 
 def run():
     """Watch /run for close events"""
-    ret = 0
     log.info('started with pid {pid} in {appdir}'.format(**gpar.__dict__))
     # assume VPN is NOT active (TODO: check openconnect/openvpn process, hard!)
     gpar.local_server = get_ns(gpar.forwarders)
@@ -269,13 +263,23 @@ def run():
     handler = ForwardHandler(par = gpar)
     notifier = pyinotify.Notifier(wm, handler)
     wm.add_watch(os.path.dirname(gpar.forwarders), mask)
-    try:
-        notifier.loop()
-    except pyinotify.NotifierError as err:
-        log.exception(err)
-        ret = 1
+    notifier.loop()
 
-    return ret
+
+def cleanup():
+    """Cleanup: make sure, redirection is disabled on exit, and dnsmasq is restarted"""
+    update_vpn_ns(False)
+
+
+def sighandler(signum, frame):
+    """Signal handler to gracefully exit the process"""
+    if signum == signal.SIGTERM:
+        signum = 0
+    else:
+        log.warning('process interrupted: %s', signum)
+    cleanup()
+    # avoid signal loop
+    os._exit(signum)
 
 
 def main(argv = None):
@@ -310,10 +314,20 @@ def main(argv = None):
         if not os.access(fn, mode):
             exit(IO_ERROR, 'mandatory file {} isn\'t {}'.format(fn, err))
 
+    for sig in (signal.SIGHUP, signal.SIGINT, signal.SIGQUIT,
+                signal.SIGPIPE, signal.SIGTERM):
+        signal.signal(sig, sighandler)
+
+    ret = 0
     try:
-        return run()
-    except KeyboardInterrupt:
-        return INTR_ERROR
+        run()
+    except SystemExit:
+        pass
+    except:
+        log.exception('internal error:')
+        cleanup()
+        ret = INTR_ERROR
+    return ret
 
 
 if __name__ == '__main__':
