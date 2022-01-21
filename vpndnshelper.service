@@ -2,6 +2,7 @@
 Description=VPN DNS Helper
 # dnsmasq needs to be the resolver on localhost
 Wants=dnsmasq.service
+After=dnsmasq.service network.target
 Wants=NetworkManager.service
 
 [Service]
